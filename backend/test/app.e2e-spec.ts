@@ -3,9 +3,13 @@ import { Test, TestingModule } from '@nestjs/testing';
 import * as request from 'supertest';
 import { AppModule } from './../src/app.module';
 import { DatabaseModule } from './../src/database/database.module';
+import { OrdersModule } from './../src/orders/orders.module';
 
 @Module({})
 class EmptyDatabaseModule {}
+
+@Module({})
+class EmptyOrdersModule {}
 
 describe('AppController (e2e)', () => {
   let app: INestApplication;
@@ -16,6 +20,8 @@ describe('AppController (e2e)', () => {
     })
       .overrideModule(DatabaseModule)
       .useModule(EmptyDatabaseModule)
+      .overrideModule(OrdersModule)
+      .useModule(EmptyOrdersModule)
       .compile();
 
     app = moduleFixture.createNestApplication();
