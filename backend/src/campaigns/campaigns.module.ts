@@ -6,6 +6,7 @@ import { Recipient } from '../database/entities/recipient.entity';
 import { AddRecipientsService } from './add-recipients.service';
 import { CreateCampaignService } from './create-campaign.service';
 import { RemoveRecipientsService } from './remove-recipients.service';
+import { ScheduleCampaignService } from './schedule-campaign.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Campaign, Customer, Recipient])],
@@ -13,11 +14,13 @@ import { RemoveRecipientsService } from './remove-recipients.service';
     CreateCampaignService,
     AddRecipientsService,
     RemoveRecipientsService,
+    ScheduleCampaignService,
   ],
   exports: [
     CreateCampaignService,
     AddRecipientsService,
     RemoveRecipientsService,
+    ScheduleCampaignService,
   ],
 })
 export class CampaignsModule {}

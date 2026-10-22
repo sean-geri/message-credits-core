@@ -3,11 +3,14 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { CustomerNotFoundError } from '../common/errors/customer-not-found.error';
+import { CampaignHasNoRecipientsError } from '../common/errors/campaign-has-no-recipients.error';
 import { CampaignNotAcceptingRecipientsError } from '../common/errors/campaign-not-accepting-recipients.error';
+import { CampaignNotDraftError } from '../common/errors/campaign-not-draft.error';
 import { CampaignNotFoundError } from '../common/errors/campaign-not-found.error';
 import { EmptyCampaignFieldError } from '../common/errors/empty-campaign-field.error';
 import { InsufficientCreditsError } from '../common/errors/insufficient-credits.error';
 import { InvalidPhoneError } from '../common/errors/invalid-phone.error';
+import { ScheduleTimeInPastError } from '../common/errors/schedule-time-in-past.error';
 import { SentCampaignRecipientsError } from '../common/errors/sent-campaign-recipients.error';
 import { Campaign } from '../database/entities/campaign.entity';
 import { CampaignStatus } from '../database/entities/campaign-status.enum';
@@ -23,12 +26,14 @@ import { AddRecipientsService } from './add-recipients.service';
 import { CampaignsModule } from './campaigns.module';
 import { CreateCampaignService } from './create-campaign.service';
 import { RemoveRecipientsService } from './remove-recipients.service';
+import { ScheduleCampaignService } from './schedule-campaign.service';
 
 describe('Campaign services', () => {
   let module: TestingModule;
   let createCampaign: CreateCampaignService;
   let addRecipients: AddRecipientsService;
   let removeRecipients: RemoveRecipientsService;
+  let scheduleCampaign: ScheduleCampaignService;
   let dataSource: DataSource;
 
   beforeAll(async () => {
@@ -58,6 +63,7 @@ describe('Campaign services', () => {
     createCampaign = module.get(CreateCampaignService);
     addRecipients = module.get(AddRecipientsService);
     removeRecipients = module.get(RemoveRecipientsService);
+    scheduleCampaign = module.get(ScheduleCampaignService);
     dataSource = module.get(DataSource);
   });
 
@@ -273,6 +279,125 @@ describe('Campaign services', () => {
       });
 
       await expect(removeRecipients.execute(campaign.id, [])).resolves.toBe(0);
+    });
+  });
+
+  describe('ScheduleCampaignService', () => {
+    const now = new Date('2026-03-01T00:00:00.000Z');
+    const sendAt = new Date('2026-03-02T00:00:00.000Z');
+
+    it('schedules a draft when it has recipients and enough credit', async () => {
+      const customer = await createCustomer(dataSource);
+      await saveOrder(dataSource, customer.id, 1);
+      const campaign = await saveCampaign(dataSource, customer.id, {
+        status: CampaignStatus.Draft,
+      });
+      await saveRecipient(dataSource, campaign.id, '+15551230001');
+
+      const scheduled = await scheduleCampaign.execute(
+        campaign.id,
+        sendAt,
+        now,
+      );
+      const stored = await dataSource.getRepository(Campaign).findOneByOrFail({
+        id: campaign.id,
+      });
+
+      expect(scheduled.status).toBe(CampaignStatus.Scheduled);
+      expect(scheduled.scheduledAt).toEqual(sendAt);
+      expect(stored.status).toBe(CampaignStatus.Scheduled);
+      expect(stored.scheduledAt).toEqual(sendAt);
+    });
+
+    it('throws CampaignNotFoundError for an unknown campaign', async () => {
+      await expect(
+        scheduleCampaign.execute(randomUUID(), sendAt, now),
+      ).rejects.toBeInstanceOf(CampaignNotFoundError);
+    });
+
+    it.each([
+      CampaignStatus.Scheduled,
+      CampaignStatus.Sent,
+      CampaignStatus.Cancelled,
+    ])('refuses a %s campaign', async (status) => {
+      const customer = await createCustomer(dataSource);
+      const campaign = await saveCampaign(dataSource, customer.id, {
+        status,
+        scheduledAt:
+          status === CampaignStatus.Draft
+            ? null
+            : new Date('2026-02-01T00:00:00.000Z'),
+        sentAt:
+          status === CampaignStatus.Sent
+            ? new Date('2026-02-02T00:00:00.000Z')
+            : null,
+      });
+      await saveRecipient(dataSource, campaign.id, '+15551230001');
+
+      const error = await scheduleCampaign
+        .execute(campaign.id, sendAt, now)
+        .then(() => null)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(CampaignNotDraftError);
+      expect(error).toMatchObject({ code: 'CAMPAIGN_NOT_DRAFT' });
+    });
+
+    it('refuses a send time that is not after now', async () => {
+      const customer = await createCustomer(dataSource);
+      await saveOrder(dataSource, customer.id, 1);
+      const campaign = await saveCampaign(dataSource, customer.id, {
+        status: CampaignStatus.Draft,
+      });
+      await saveRecipient(dataSource, campaign.id, '+15551230001');
+
+      const error = await scheduleCampaign
+        .execute(campaign.id, now, now)
+        .then(() => null)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(ScheduleTimeInPastError);
+      expect(error).toMatchObject({
+        code: 'SCHEDULE_TIME_IN_PAST',
+        message: 'time is in the past',
+      });
+      const stored = await dataSource.getRepository(Campaign).findOneByOrFail({
+        id: campaign.id,
+      });
+      expect(stored.status).toBe(CampaignStatus.Draft);
+    });
+
+    it('refuses a draft with no recipients', async () => {
+      const customer = await createCustomer(dataSource);
+      const campaign = await saveCampaign(dataSource, customer.id, {
+        status: CampaignStatus.Draft,
+      });
+
+      const error = await scheduleCampaign
+        .execute(campaign.id, sendAt, now)
+        .then(() => null)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(CampaignHasNoRecipientsError);
+      expect(error).toMatchObject({ code: 'CAMPAIGN_HAS_NO_RECIPIENTS' });
+    });
+
+    it('refuses when recipients exceed available credit', async () => {
+      const customer = await createCustomer(dataSource);
+      await saveOrder(dataSource, customer.id, 1);
+      const campaign = await saveCampaign(dataSource, customer.id, {
+        status: CampaignStatus.Draft,
+      });
+      await saveRecipient(dataSource, campaign.id, '+15551230001');
+      await saveRecipient(dataSource, campaign.id, '+15551230002');
+
+      await expect(
+        scheduleCampaign.execute(campaign.id, sendAt, now),
+      ).rejects.toThrow(new InsufficientCreditsError(2, 1));
+      const stored = await dataSource.getRepository(Campaign).findOneByOrFail({
+        id: campaign.id,
+      });
+      expect(stored.status).toBe(CampaignStatus.Draft);
     });
   });
 });
