@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { join } from 'path';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { CampaignsModule } from './campaigns/campaigns.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { OrdersModule } from './orders/orders.module';
@@ -15,6 +16,7 @@ import { OrdersModule } from './orders/orders.module';
     }),
     DatabaseModule,
     OrdersModule,
+    CampaignsModule,
     HealthModule,
   ],
   controllers: [AppController],
