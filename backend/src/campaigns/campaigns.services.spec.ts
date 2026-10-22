@@ -7,6 +7,7 @@ import { CampaignHasNoRecipientsError } from '../common/errors/campaign-has-no-r
 import { CampaignNotAcceptingRecipientsError } from '../common/errors/campaign-not-accepting-recipients.error';
 import { CampaignNotDraftError } from '../common/errors/campaign-not-draft.error';
 import { CampaignNotFoundError } from '../common/errors/campaign-not-found.error';
+import { CampaignNotScheduledError } from '../common/errors/campaign-not-scheduled.error';
 import { EmptyCampaignFieldError } from '../common/errors/empty-campaign-field.error';
 import { InsufficientCreditsError } from '../common/errors/insufficient-credits.error';
 import { InvalidPhoneError } from '../common/errors/invalid-phone.error';
@@ -20,9 +21,12 @@ import { Message } from '../database/entities/message.entity';
 import { Order } from '../database/entities/order.entity';
 import { OrderStatus } from '../database/entities/order-status.enum';
 import { Recipient } from '../database/entities/recipient.entity';
+import { calculateAvailableCredit } from '../common/calculate-available-credit';
+import { lockCustomer } from '../common/lock-customer';
 import { createCustomer } from '../../test/utils/create-customer';
 import { resetDb } from '../../test/utils/reset-db';
 import { AddRecipientsService } from './add-recipients.service';
+import { CancelScheduleService } from './cancel-schedule.service';
 import { CampaignsModule } from './campaigns.module';
 import { CreateCampaignService } from './create-campaign.service';
 import { RemoveRecipientsService } from './remove-recipients.service';
@@ -34,6 +38,7 @@ describe('Campaign services', () => {
   let addRecipients: AddRecipientsService;
   let removeRecipients: RemoveRecipientsService;
   let scheduleCampaign: ScheduleCampaignService;
+  let cancelSchedule: CancelScheduleService;
   let dataSource: DataSource;
 
   beforeAll(async () => {
@@ -64,6 +69,7 @@ describe('Campaign services', () => {
     addRecipients = module.get(AddRecipientsService);
     removeRecipients = module.get(RemoveRecipientsService);
     scheduleCampaign = module.get(ScheduleCampaignService);
+    cancelSchedule = module.get(CancelScheduleService);
     dataSource = module.get(DataSource);
   });
 
@@ -400,6 +406,93 @@ describe('Campaign services', () => {
       expect(stored.status).toBe(CampaignStatus.Draft);
     });
   });
+
+  describe('CancelScheduleService', () => {
+    const now = new Date('2026-03-01T00:00:00.000Z');
+    const sendAt = new Date('2026-03-02T00:00:00.000Z');
+
+    it('cancels a scheduled campaign, which goes back to draft and frees the credit', async () => {
+      const customer = await createCustomer(dataSource);
+      await saveOrder(dataSource, customer.id, 1);
+      const campaign = await saveCampaign(dataSource, customer.id, {
+        status: CampaignStatus.Scheduled,
+        scheduledAt: sendAt,
+      });
+      await saveRecipient(dataSource, campaign.id, '+15551230001');
+
+      expect(await availableCredit(dataSource, customer.id)).toBe(0);
+
+      const cancelled = await cancelSchedule.cancelSchedule(campaign.id);
+      const stored = await dataSource.getRepository(Campaign).findOneByOrFail({
+        id: campaign.id,
+      });
+
+      expect(cancelled.status).toBe(CampaignStatus.Draft);
+      expect(cancelled.scheduledAt).toBeNull();
+      expect(stored.status).toBe(CampaignStatus.Draft);
+      expect(stored.scheduledAt).toBeNull();
+      await expect(phonesFor(dataSource, campaign.id)).resolves.toEqual([
+        '+15551230001',
+      ]);
+      expect(await availableCredit(dataSource, customer.id)).toBe(1);
+    });
+
+    it('refuses a draft campaign', async () => {
+      const customer = await createCustomer(dataSource);
+      const campaign = await saveCampaign(dataSource, customer.id, {
+        status: CampaignStatus.Draft,
+      });
+
+      const error = await cancelSchedule
+        .cancelSchedule(campaign.id)
+        .then(() => null)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(CampaignNotScheduledError);
+      expect(error).toMatchObject({ code: 'CAMPAIGN_NOT_SCHEDULED' });
+    });
+
+    it('refuses a sent campaign', async () => {
+      const customer = await createCustomer(dataSource);
+      const campaign = await saveCampaign(dataSource, customer.id, {
+        status: CampaignStatus.Sent,
+        scheduledAt: new Date('2026-02-01T00:00:00.000Z'),
+        sentAt: new Date('2026-02-02T00:00:00.000Z'),
+      });
+
+      const error = await cancelSchedule
+        .cancelSchedule(campaign.id)
+        .then(() => null)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(CampaignNotScheduledError);
+      expect(error).toMatchObject({ code: 'CAMPAIGN_NOT_SCHEDULED' });
+      const stored = await dataSource.getRepository(Campaign).findOneByOrFail({
+        id: campaign.id,
+      });
+      expect(stored.status).toBe(CampaignStatus.Sent);
+    });
+
+    it('can be scheduled again after cancelling', async () => {
+      const customer = await createCustomer(dataSource);
+      await saveOrder(dataSource, customer.id, 1);
+      const campaign = await saveCampaign(dataSource, customer.id, {
+        status: CampaignStatus.Scheduled,
+        scheduledAt: new Date('2026-02-01T00:00:00.000Z'),
+      });
+      await saveRecipient(dataSource, campaign.id, '+15551230001');
+
+      await cancelSchedule.cancelSchedule(campaign.id);
+      const scheduled = await scheduleCampaign.execute(
+        campaign.id,
+        sendAt,
+        now,
+      );
+
+      expect(scheduled.status).toBe(CampaignStatus.Scheduled);
+      expect(scheduled.scheduledAt).toEqual(sendAt);
+    });
+  });
 });
 
 async function saveCampaign(
@@ -449,4 +542,14 @@ function phonesFor(
     .getRepository(Recipient)
     .find({ where: { campaignId }, order: { phone: 'ASC' } })
     .then((recipients) => recipients.map((recipient) => recipient.phone));
+}
+
+function availableCredit(
+  dataSource: DataSource,
+  customerId: string,
+): Promise<number> {
+  return dataSource.transaction(async (manager) => {
+    await lockCustomer(manager, customerId);
+    return calculateAvailableCredit(manager, customerId);
+  });
 }
