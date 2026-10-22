@@ -5,6 +5,7 @@ import { AppModule } from './../src/app.module';
 import { CampaignsModule } from './../src/campaigns/campaigns.module';
 import { DatabaseModule } from './../src/database/database.module';
 import { OrdersModule } from './../src/orders/orders.module';
+import { SendingModule } from './../src/sending/sending.module';
 
 @Module({})
 class EmptyDatabaseModule {}
@@ -14,6 +15,9 @@ class EmptyOrdersModule {}
 
 @Module({})
 class EmptyCampaignsModule {}
+
+@Module({})
+class EmptySendingModule {}
 
 describe('AppController (e2e)', () => {
   let app: INestApplication;
@@ -28,6 +32,8 @@ describe('AppController (e2e)', () => {
       .useModule(EmptyOrdersModule)
       .overrideModule(CampaignsModule)
       .useModule(EmptyCampaignsModule)
+      .overrideModule(SendingModule)
+      .useModule(EmptySendingModule)
       .compile();
 
     app = moduleFixture.createNestApplication();
