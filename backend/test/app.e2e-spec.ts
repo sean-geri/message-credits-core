@@ -2,6 +2,7 @@ import { INestApplication, Module } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import * as request from 'supertest';
 import { AppModule } from './../src/app.module';
+import { BalanceModule } from './../src/balance/balance.module';
 import { CampaignsModule } from './../src/campaigns/campaigns.module';
 import { DatabaseModule } from './../src/database/database.module';
 import { OrdersModule } from './../src/orders/orders.module';
@@ -19,6 +20,9 @@ class EmptyCampaignsModule {}
 @Module({})
 class EmptySendingModule {}
 
+@Module({})
+class EmptyBalanceModule {}
+
 describe('AppController (e2e)', () => {
   let app: INestApplication;
 
@@ -34,6 +38,8 @@ describe('AppController (e2e)', () => {
       .useModule(EmptyCampaignsModule)
       .overrideModule(SendingModule)
       .useModule(EmptySendingModule)
+      .overrideModule(BalanceModule)
+      .useModule(EmptyBalanceModule)
       .compile();
 
     app = moduleFixture.createNestApplication();
