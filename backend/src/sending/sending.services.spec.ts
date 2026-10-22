@@ -115,6 +115,121 @@ describe('Sending services', () => {
 
       await expect(sendDueCampaigns.execute(now)).resolves.toEqual([]);
     });
+
+    it('sends each due campaign once when two executes run together', async () => {
+      const customer = await createCustomer(dataSource);
+      const now = new Date('2026-04-01T00:00:00.000Z');
+      const older = await saveScheduledCampaign(
+        dataSource,
+        customer.id,
+        new Date('2026-03-01T00:00:00.000Z'),
+        ['+15551230001', '+15551230002'],
+      );
+      const newer = await saveScheduledCampaign(
+        dataSource,
+        customer.id,
+        new Date('2026-03-15T00:00:00.000Z'),
+        ['+15551230003'],
+      );
+
+      const [first, second] = await Promise.all([
+        sendDueCampaigns.execute(now),
+        sendDueCampaigns.execute(now),
+      ]);
+      const sentIds = [...first, ...second].sort();
+
+      expect(sentIds).toEqual([older.id, newer.id].sort());
+      expect(new Set(sentIds).size).toBe(2);
+      await expect(messageStatuses(dataSource, older.id)).resolves.toEqual([
+        MessageStatus.Pending,
+        MessageStatus.Pending,
+      ]);
+      await expect(messageStatuses(dataSource, newer.id)).resolves.toEqual([
+        MessageStatus.Pending,
+      ]);
+    });
+
+    it('ignores draft, cancelled, and not-yet-due campaigns', async () => {
+      const customer = await createCustomer(dataSource);
+      const now = new Date('2026-04-01T00:00:00.000Z');
+      const past = new Date('2026-03-01T00:00:00.000Z');
+      const due = await saveScheduledCampaign(dataSource, customer.id, past, [
+        '+15551230001',
+      ]);
+      const draft = await saveCampaignWithRecipients(
+        dataSource,
+        customer.id,
+        CampaignStatus.Draft,
+        past,
+        ['+15551230002'],
+      );
+      const cancelled = await saveCampaignWithRecipients(
+        dataSource,
+        customer.id,
+        CampaignStatus.Cancelled,
+        past,
+        ['+15551230003'],
+      );
+      const future = await saveScheduledCampaign(
+        dataSource,
+        customer.id,
+        new Date('2026-05-01T00:00:00.000Z'),
+        ['+15551230004'],
+      );
+
+      await expect(sendDueCampaigns.execute(now)).resolves.toEqual([due.id]);
+
+      const stored = await dataSource.getRepository(Campaign).find({
+        where: [{ id: draft.id }, { id: cancelled.id }, { id: future.id }],
+      });
+      const statusById = new Map(
+        stored.map((campaign) => [campaign.id, campaign.status]),
+      );
+      expect(statusById.get(draft.id)).toBe(CampaignStatus.Draft);
+      expect(statusById.get(cancelled.id)).toBe(CampaignStatus.Cancelled);
+      expect(statusById.get(future.id)).toBe(CampaignStatus.Scheduled);
+      await expect(messageStatuses(dataSource, draft.id)).resolves.toEqual([]);
+      await expect(messageStatuses(dataSource, cancelled.id)).resolves.toEqual(
+        [],
+      );
+      await expect(messageStatuses(dataSource, future.id)).resolves.toEqual([]);
+    });
+
+    it('sends when available credit is negative after an order was cancelled', async () => {
+      const customer = await createCustomer(dataSource);
+      const now = new Date('2026-04-01T00:00:00.000Z');
+      const order = await dataSource.getRepository(Order).save({
+        customerId: customer.id,
+        credits: 2,
+        status: OrderStatus.Active,
+      });
+      const campaign = await saveScheduledCampaign(
+        dataSource,
+        customer.id,
+        new Date('2026-03-01T00:00:00.000Z'),
+        ['+15551230001', '+15551230002'],
+      );
+
+      await dataSource.getRepository(Order).update(order.id, {
+        status: OrderStatus.Cancelled,
+        cancelledAt: new Date('2026-03-20T00:00:00.000Z'),
+      });
+
+      expect(await availableCredit(dataSource, customer.id)).toBe(-2);
+
+      await expect(sendDueCampaigns.execute(now)).resolves.toEqual([
+        campaign.id,
+      ]);
+      const stored = await dataSource
+        .getRepository(Campaign)
+        .findOneByOrFail({ id: campaign.id });
+      expect(stored.status).toBe(CampaignStatus.Sent);
+      expect(stored.sentAt).toEqual(now);
+      await expect(messageStatuses(dataSource, campaign.id)).resolves.toEqual([
+        MessageStatus.Pending,
+        MessageStatus.Pending,
+      ]);
+    });
   });
 
   describe('RecordDispatchResultService', () => {
@@ -253,6 +368,31 @@ async function saveScheduledCampaign(
     name: 'Launch',
     body: 'Hello',
     status: CampaignStatus.Scheduled,
+    scheduledAt,
+  });
+
+  for (const phone of phones) {
+    await dataSource.getRepository(Recipient).save({
+      campaignId: campaign.id,
+      phone,
+    });
+  }
+
+  return campaign;
+}
+
+async function saveCampaignWithRecipients(
+  dataSource: DataSource,
+  customerId: string,
+  status: CampaignStatus,
+  scheduledAt: Date,
+  phones: string[],
+): Promise<Campaign> {
+  const campaign = await dataSource.getRepository(Campaign).save({
+    customerId,
+    name: 'Launch',
+    body: 'Hello',
+    status,
     scheduledAt,
   });
 
